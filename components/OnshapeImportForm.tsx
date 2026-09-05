@@ -1,6 +1,21 @@
 "use client";
 
-import { FormEvent, useState } from "react";
+import { FormEvent, useMemo, useState } from "react";
+import { computeTunedPid } from "../lib/tuning";
+import {
+  DEFAULT_CONTROL_PERIOD_S,
+  DEFAULT_EXTERNAL_GEAR_RATIO,
+  DEFAULT_FRICTION,
+  DEFAULT_MOTOR,
+  DEFAULT_MOTORS_PER_SIDE,
+  DEFAULT_TRACK_WIDTH_IN,
+  DEFAULT_WHEEL_DIAMETER_IN,
+  INCH_TO_METER,
+  V5_MOTOR_CARTRIDGES,
+  type MotorSpec,
+} from "../lib/tuning/constants";
+import type { DrivetrainConfig, TuningResult } from "../lib/tuning/types";
+import { TuningGraph } from "./TuningGraph";
 
 interface InertiaTensor {
   ixx: number;
@@ -33,6 +48,23 @@ interface ApiError {
   message: string;
 }
 
+interface DriveSetup {
+  motor: MotorSpec;
+  config: DrivetrainConfig;
+}
+
+interface TuningState {
+  tuning: TuningResult;
+  error: null;
+}
+
+interface TuningErrorState {
+  tuning: null;
+  error: string;
+}
+
+type TuningStateResult = TuningState | TuningErrorState | null;
+
 const ERROR_TITLES: Record<string, string> = {
   INVALID_REQUEST: "Invalid request",
   MISSING_ACCESS_KEY: "Missing access key",
@@ -51,6 +83,51 @@ function formatNumber(value: number, digits = 4): string {
   return value.toLocaleString("en-US", { maximumFractionDigits: digits });
 }
 
+function parsePositive(value: string): number | null {
+  const parsed = parseFloat(value);
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : null;
+}
+
+function parsePositiveInt(value: string): number | null {
+  const parsed = parsePositive(value);
+  return parsed !== null && Number.isInteger(parsed) ? parsed : null;
+}
+
+function buildDriveSetup(
+  motorCartridgeId: string,
+  wheelDiameterIn: string,
+  trackWidthIn: string,
+  motorsPerSide: string,
+  externalGearRatio: string,
+  controlPeriodS: string,
+): DriveSetup | null {
+  const motor =
+    V5_MOTOR_CARTRIDGES.find((c) => c.id === motorCartridgeId) ?? DEFAULT_MOTOR;
+  const wheelDiameter = parsePositive(wheelDiameterIn);
+  const trackWidth = parsePositive(trackWidthIn);
+  const motors = parsePositiveInt(motorsPerSide);
+  const gearRatio = parsePositive(externalGearRatio);
+  const controlPeriod = parsePositive(controlPeriodS);
+
+  if (wheelDiameter === null || trackWidth === null || motors === null || gearRatio === null || controlPeriod === null) {
+    return null;
+  }
+
+  return {
+    motor,
+    config: {
+      wheelDiameter: wheelDiameter * INCH_TO_METER,
+      trackWidth: trackWidth * INCH_TO_METER,
+      motorsPerSide: motors,
+      externalGearRatio: gearRatio,
+      motorFreeSpeed: motor.freeSpeedRpm * ((2 * Math.PI) / 60),
+      motorStallTorque: motor.stallTorqueNm,
+      controlPeriod,
+      friction: DEFAULT_FRICTION,
+    },
+  };
+}
+
 export function OnshapeImportForm() {
   const [accessKey, setAccessKey] = useState("");
   const [secretKey, setSecretKey] = useState("");
@@ -58,6 +135,35 @@ export function OnshapeImportForm() {
   const [status, setStatus] = useState<"idle" | "loading" | "success" | "error">("idle");
   const [result, setResult] = useState<MassPropertiesResult | null>(null);
   const [error, setError] = useState<ApiError | null>(null);
+
+  const [motorCartridgeId, setMotorCartridgeId] = useState(DEFAULT_MOTOR.id);
+  const [wheelDiameterIn, setWheelDiameterIn] = useState(String(DEFAULT_WHEEL_DIAMETER_IN));
+  const [trackWidthIn, setTrackWidthIn] = useState(String(DEFAULT_TRACK_WIDTH_IN));
+  const [motorsPerSide, setMotorsPerSide] = useState(String(DEFAULT_MOTORS_PER_SIDE));
+  const [externalGearRatio, setExternalGearRatio] = useState(String(DEFAULT_EXTERNAL_GEAR_RATIO));
+  const [controlPeriodS, setControlPeriodS] = useState(String(DEFAULT_CONTROL_PERIOD_S));
+
+  const driveSetup = useMemo(
+    () =>
+      buildDriveSetup(
+        motorCartridgeId,
+        wheelDiameterIn,
+        trackWidthIn,
+        motorsPerSide,
+        externalGearRatio,
+        controlPeriodS,
+      ),
+    [motorCartridgeId, wheelDiameterIn, trackWidthIn, motorsPerSide, externalGearRatio, controlPeriodS],
+  );
+
+  const tuning: TuningStateResult = useMemo(() => {
+    if (!driveSetup || !result) return null;
+    try {
+      return { tuning: computeTunedPid({ massKg: result.massKg, izz: result.inertia.izz }, driveSetup.config), error: null };
+    } catch (err) {
+      return { tuning: null, error: err instanceof Error ? err.message : "PID tuning failed." };
+    }
+  }, [driveSetup, result]);
 
   async function handleSubmit(e: FormEvent) {
     e.preventDefault();
@@ -144,6 +250,105 @@ export function OnshapeImportForm() {
             placeholder="https://cad.onshape.com/documents/{did}/w/{wid}/e/{eid}"
           />
         </div>
+
+        <fieldset className="drive-setup">
+          <legend>Drive setup</legend>
+
+          <div className="field">
+            <label htmlFor="motor-cartridge">Motor cartridge</label>
+            <select
+              id="motor-cartridge"
+              value={motorCartridgeId}
+              onChange={(e) => setMotorCartridgeId(e.target.value)}
+              disabled={status === "loading"}
+            >
+              {V5_MOTOR_CARTRIDGES.map((cartridge) => (
+                <option key={cartridge.id} value={cartridge.id}>
+                  {cartridge.label}
+                </option>
+              ))}
+            </select>
+          </div>
+
+          <div className="form-row">
+            <div className="field">
+              <label htmlFor="wheel-diameter">Wheel diameter</label>
+              <input
+                id="wheel-diameter"
+                type="number"
+                inputMode="decimal"
+                min="0.1"
+                step="0.1"
+                value={wheelDiameterIn}
+                onChange={(e) => setWheelDiameterIn(e.target.value)}
+                disabled={status === "loading"}
+              />
+              <span className="field-unit">inches</span>
+            </div>
+
+            <div className="field">
+              <label htmlFor="track-width">Track width</label>
+              <input
+                id="track-width"
+                type="number"
+                inputMode="decimal"
+                min="0.1"
+                step="0.1"
+                value={trackWidthIn}
+                onChange={(e) => setTrackWidthIn(e.target.value)}
+                disabled={status === "loading"}
+              />
+              <span className="field-unit">inches, center-to-center</span>
+            </div>
+          </div>
+
+          <div className="form-row">
+            <div className="field">
+              <label htmlFor="motors-per-side">Motors per side</label>
+              <input
+                id="motors-per-side"
+                type="number"
+                inputMode="numeric"
+                min="1"
+                step="1"
+                value={motorsPerSide}
+                onChange={(e) => setMotorsPerSide(e.target.value)}
+                disabled={status === "loading"}
+              />
+              <span className="field-unit">V5 motors driving each side</span>
+            </div>
+
+            <div className="field">
+              <label htmlFor="gear-ratio">External gear ratio</label>
+              <input
+                id="gear-ratio"
+                type="number"
+                inputMode="decimal"
+                min="0.1"
+                step="0.01"
+                value={externalGearRatio}
+                onChange={(e) => setExternalGearRatio(e.target.value)}
+                disabled={status === "loading"}
+              />
+              <span className="field-unit">wheel : motor (e.g. 2 = 2× speed)</span>
+            </div>
+          </div>
+
+          <div className="field">
+            <label htmlFor="control-period">Control loop period</label>
+            <input
+              id="control-period"
+              type="number"
+              inputMode="decimal"
+              min="0.001"
+              step="0.001"
+              value={controlPeriodS}
+              onChange={(e) => setControlPeriodS(e.target.value)}
+              disabled={status === "loading"}
+            />
+            <span className="field-unit">seconds between PID updates (e.g. 0.01)</span>
+          </div>
+        </fieldset>
 
         <p className="note">
           Your keys are used only for this one request and are never stored, logged, or written to
@@ -233,10 +438,66 @@ export function OnshapeImportForm() {
             kg·m². I<sub>zz</sub> governs turning/yaw — the key value for drive PID.
           </p>
 
-          <p className="source">
-            {result.source.host} · document {result.source.documentId} · {result.source.workspaceType}{" "}
-            {result.source.workspaceId} · element {result.source.elementId}
-          </p>
+          <h3 className="subheading">Tuned drive PID</h3>
+
+          {result.massKg <= 0 && (
+            <div className="warning" role="note">
+              The imported assembly reports no mass, so PID values cannot be tuned. Assign
+              materials/density to the parts in CAD and re-import.
+            </div>
+          )}
+
+          {result.massKg > 0 && !driveSetup && (
+            <div className="warning" role="note">
+              Enter valid drive setup values (positive wheel diameter, track width, motors per side,
+              gear ratio, and control period) to tune the PID.
+            </div>
+          )}
+
+          {result.massKg > 0 && driveSetup && tuning && tuning.error && (
+            <div className="error tuning-error" role="note">
+              <p>{tuning.error}</p>
+            </div>
+          )}
+
+          {result.massKg > 0 && driveSetup && tuning && tuning.tuning && (
+            <>
+              <div className="metric-grid">
+                <div className="metric">
+                  <span className="metric-label">kP</span>
+                  <span className="metric-value">{formatNumber(tuning.tuning.gains.kP)}</span>
+                  <span className="metric-unit">power per meter of error</span>
+                </div>
+                <div className="metric">
+                  <span className="metric-label">kI</span>
+                  <span className="metric-value">{formatNumber(tuning.tuning.gains.kI)}</span>
+                  <span className="metric-unit">power per meter·s of error</span>
+                </div>
+                <div className="metric">
+                  <span className="metric-label">kD</span>
+                  <span className="metric-value">{formatNumber(tuning.tuning.gains.kD)}</span>
+                  <span className="metric-unit">power per m/s of error</span>
+                </div>
+              </div>
+              <p className="note tuning-note">
+                Tuned against a simulated drivetrain using Ziegler-Nichols (ultimate gain{" "}
+                {formatNumber(tuning.tuning.ku)}, ultimate period {formatNumber(tuning.tuning.pu, 3)} s)
+                with {driveSetup.motor.label} cartridges, {driveSetup.config.motorsPerSide} per side,
+                {driveSetup.config.externalGearRatio}× external ratio, and a{" "}
+                {driveSetup.config.controlPeriod} s loop. Commands are normalized power (−1…1); scale
+                by 12,000 for motor millivolts. This is a starting point — verify on the real robot
+                and tune from there.
+              </p>
+
+              <h3 className="subheading">Simulated response</h3>
+              <TuningGraph
+                robot={{ massKg: result.massKg, izz: result.inertia.izz }}
+                config={driveSetup.config}
+                gains={tuning.tuning.gains}
+                target={1}
+              />
+            </>
+          )}
         </div>
       )}
     </div>

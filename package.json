@@ -8,7 +8,7 @@
     "start": "next start",
     "lint": "eslint",
     "typecheck": "tsc --noEmit",
-    "test": "tsx --test scripts/onshape.test.ts",
+    "test": "tsx --test scripts/onshape.test.ts scripts/tuning.test.ts",
     "live:onshape": "tsx scripts/live-test.ts"
   },
   "dependencies": {
